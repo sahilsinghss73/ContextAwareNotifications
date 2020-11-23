@@ -62,8 +62,11 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
+
+import static java.lang.Math.max;
 
 public class NotificationService extends Service
 {
@@ -81,7 +84,10 @@ public class NotificationService extends Service
 	LocationCallback locationCallback;
 	private String locationType;
 	private long locationUpdateTime;
+	private Set<String> restrictedLocations = new HashSet<String>();
 
+
+	private Timer locationTimer;
 	private Timer calendarTimer;
 
 	public NotificationService()
@@ -120,11 +126,18 @@ public class NotificationService extends Service
 		mUpdateReceiver = new ActivityUpdateReceiver();
 		registerReceiver(mUpdateReceiver, new IntentFilter(ACTIVITY_RECOGNITION_ACTION));
 		enableActivityUpdates(this);
+
+		restrictedLocations.add("hospital");
+		restrictedLocations.add("bank");
+		restrictedLocations.add("industrial");
+		restrictedLocations.add("college");
+		restrictedLocations.add("university");
+		restrictedLocations.add("restaurant");
 	}
 
 	private void createNotificationChannel()
 	{
-		NotificationChannel notificationChannel = new NotificationChannel("ChannelId", "Foreground Notification", NotificationManager.IMPORTANCE_DEFAULT);
+		NotificationChannel notificationChannel = new NotificationChannel("ChannelId", "Foreground Notification", NotificationManager.IMPORTANCE_LOW);
 		NotificationManager notificationManager = getSystemService(NotificationManager.class);
 		notificationManager.createNotificationChannel(notificationChannel);
 	}
@@ -145,6 +158,10 @@ public class NotificationService extends Service
 		{
 			calendarTimer.cancel();
 		}
+//		if(locationTimer != null)
+//		{
+//			locationTimer.cancel();
+//		}
 		stopForeground(true);
 		unregisterReceiver(mUpdateReceiver);
 		stopSelf();
@@ -201,7 +218,7 @@ public class NotificationService extends Service
 	private void enableActivityUpdates(final Context context)
 	{
 		Task<Void> task = ActivityRecognition.getClient(context)
-				.requestActivityUpdates(period, mActivityPendingIntent);
+				.requestActivityUpdates(Constants.ACTIVITY_REFRESH_TIME, mActivityPendingIntent);
 
 		task.addOnSuccessListener(
 				new OnSuccessListener<Void>()
@@ -301,34 +318,80 @@ public class NotificationService extends Service
 		@Override
 		protected void onPostExecute(List<String> calendarEvents)
 		{
+			StringBuilder sb = new StringBuilder();
+			int level = 0;
+
 			if (calendarEvents != null && calendarEvents.size() > 0)
 			{
 				//TODO check if any title in 'calendarEvents' corresponds to a meeting
-
-				silentMode();
-			}
-			else if(activity != null && System.currentTimeMillis()-activityUpdateTime <= Constants.CACHE_INVALID_TIME )
-			{
-				if((activity.getType() == DetectedActivity.WALKING
-						|| activity.getType() == DetectedActivity.RUNNING
-						|| activity.getType() == DetectedActivity.IN_VEHICLE))
-				{
-					vibrationMode();
-				}
-				else
-				{
-					ringerMode();
-				}
-			}
-			else if(locationType != null && System.currentTimeMillis()-locationUpdateTime <= Constants.CACHE_INVALID_TIME )
-			{
-				Log.d("lol1234",locationType);
-				//TODO add conditions for different locationType
+				sb.append("In meeting");
+				level = 2;
 			}
 			else
 			{
+				sb.append("No meetings");
+			}
+
+			if(activity != null && System.currentTimeMillis()-activityUpdateTime <= Constants.CACHE_INVALID_TIME )
+			{
+				switch(activity.getType())
+				{
+					case DetectedActivity.STILL:
+						sb.append(" | Still");
+						break;
+					case DetectedActivity.IN_VEHICLE:
+						sb.append(" | Driving");
+						level = max(level, 1);
+						break;
+					case DetectedActivity.ON_BICYCLE:
+						sb.append(" | Cycling");
+						level = max(level, 1);
+						break;
+					case DetectedActivity.ON_FOOT:
+					case DetectedActivity.WALKING:
+						sb.append(" | Walking");
+						level = max(level, 1);
+						break;
+					case DetectedActivity.RUNNING:
+						sb.append(" | Running");
+						level = max(level, 1);
+						break;
+					default:
+						sb.append(" | Unknown");
+						break;
+				}
+			}
+
+			if(locationType != null && System.currentTimeMillis()-locationUpdateTime <= Constants.CACHE_INVALID_TIME )
+			{
+				Log.d("MY_LOC", locationType);
+				if(restrictedLocations.contains(locationType))
+				{
+					level = max(level, 1);
+				}
+				sb.append(" | At a "+locationType);
+			}
+
+			if (level == 0) {
 				ringerMode();
 			}
+			else if (level == 1) {
+				vibrationMode();
+			}
+			else {
+				silentMode();
+			}
+
+			Intent intent1 = new Intent(getApplicationContext(), MainActivity.class);
+			PendingIntent pendingIntent = PendingIntent.getActivity(getApplicationContext(), 0, intent1, 0);
+			Notification notification = new NotificationCompat.Builder(getApplicationContext(), "ChannelId")
+					.setContentTitle("Actively Tracking Activity & Calendar")
+					.setContentText(sb.toString())
+					.setSmallIcon(R.mipmap.ic_launcher_round)
+					.setContentIntent(pendingIntent).build();
+			startForeground(1, notification);
+			Log.d(TAG, sb.toString());
+			Log.d(TAG, getApplicationContext().toString());
 		}
 	}
 
@@ -372,17 +435,16 @@ public class NotificationService extends Service
 		calendarTimer.schedule(task, 0, Constants.CONTEXT_REFRESH_TIME);//request for new Calendar info every 10 secs;
 	}
 
-
 	private void getCurrentLocation()
 	{
 		LocationRequest locationRequest = new LocationRequest();
 		locationRequest.setInterval(Constants.LOCATION_REFRESH_TIME);
-		locationRequest.setFastestInterval(2000);
+		locationRequest.setFastestInterval(Constants.LOCATION_REFRESH_TIME/2);
 		locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
 
-		if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED)
+		if (ActivityCompat.checkSelfPermission(getApplicationContext(), Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(getApplicationContext(), Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED)
 		{
-			Intent dialogIntent = new Intent(this, MainActivity.class);
+			Intent dialogIntent = new Intent(NotificationService.this, MainActivity.class);
 			dialogIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
 			startActivity(dialogIntent);
 			return ;
@@ -393,6 +455,7 @@ public class NotificationService extends Service
 			public void onLocationResult(LocationResult locationResult)
 			{
 				super.onLocationResult(locationResult);
+
 				if(locationResult != null && locationResult.getLocations().size()>0)
 				{
 					int latestLocationIndex = locationResult.getLocations().size()-1;
@@ -407,11 +470,13 @@ public class NotificationService extends Service
 				.requestLocationUpdates(locationRequest,locationCallback,Looper.getMainLooper());
 	}
 
+
 	private void fetchAddressFromLatLong(double latitude,double longitude)
 	{
 		//TODO access location type by making a volley request. and update 'time' & 'type';
 		String URL = String.format("https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=%s&lon=%s",latitude,longitude);
 		Log.d("here","1122");
+		Log.d("coordinates2",String.format("%s %s",latitude,longitude));
 		JsonObjectRequest jsonObjectRequest = new JsonObjectRequest
 				(Request.Method.GET, URL, null, new Response.Listener<JSONObject>()
 				{
@@ -429,6 +494,7 @@ public class NotificationService extends Service
 						{
 							e.printStackTrace();
 						}
+
 					}
 				}, new Response.ErrorListener()
 				{
@@ -436,7 +502,7 @@ public class NotificationService extends Service
 					public void onErrorResponse(VolleyError error)
 					{
 						// TODO: Handle error
-						Log.d("ERROR", "Error occurred ", error);
+						Log.d("MY_LOC", error.toString());
 					}
 				}){
 			@Override
